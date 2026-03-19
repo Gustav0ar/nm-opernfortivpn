@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  push:
+    branches:
+      - master
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential meson ninja-build pkg-config \
+            libnm-dev libgtk-3-dev libglib2.0-dev ppp-dev \
+            python3 python3-gi python3-pytest gir1.2-gtk-4.0 \
+            openfortivpn ppp
+
+      - name: Configure build
+        run: meson setup build-ci
+
+      - name: Compile
+        run: meson compile -C build-ci
+
+      - name: Run Meson tests
+        run: meson test -C build-ci --print-errorlogs
+
+      - name: Run Python tests
+        run: python3 -m pytest tests/ -v
+
+      - name: Upload Meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-${{ github.run_id }}
+          path: build-ci/meson-logs/

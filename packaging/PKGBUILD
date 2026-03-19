@@ -1,0 +1,50 @@
+# Maintainer: Your Name <your@email.com>
+pkgname=nm-openfortivpn
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="NetworkManager VPN plugin for openfortivpn (Fortinet SSL VPN)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Gustav0ar/nm-opernfortivpn"
+license=('GPL-2.0-only')
+depends=(
+    'networkmanager'
+    'openfortivpn'
+    'ppp'
+    'gtk3'
+    'gtk4'
+    'python'
+    'python-gobject'
+)
+makedepends=(
+    'meson'
+    'ninja'
+    'libnm'
+    'ppp'  # for pppd headers
+)
+optdepends=(
+    'nm-connection-editor: GUI connection editor'
+    'gnome-keyring: secure password storage on GNOME'
+    'kwallet: secure password storage on KDE'
+)
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    meson setup build \
+        --prefix=/usr \
+        --libdir=lib \
+        --libexecdir=lib \
+        -Dtests=false
+    ninja -C build
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    meson test -C build
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    DESTDIR="$pkgdir" ninja -C build install
+}

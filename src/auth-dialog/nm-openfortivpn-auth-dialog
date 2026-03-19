@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""
+nm-openfortivpn-auth-dialog — Authentication dialog for nm-openfortivpn.
+
+Handles the NM auth-dialog protocol:
+  - Reads connection data and hints from stdin
+  - Prompts for password, OTP, or certificate trust
+  - Writes secrets to stdout
+
+Uses pure GTK4 (no libadwaita) for maximum DE compatibility
+(GNOME, KDE, Niri, Hyprland).
+"""
+
+import sys
+import os
+import logging
+
+import gi
+gi.require_version('Gtk', '4.0')
+gi.require_version('NM', '1.0')
+from gi.repository import Gtk, GLib, NM
+
+# Shared constants
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shared'))
+from nm_openfortivpn_keys import (
+    KEY_PASSWORD, KEY_OTP, KEY_USER, KEY_GATEWAY, KEY_TRUSTED_CERT,
+    HINT_UNTRUSTED_CERT_HASH, HINT_UNTRUSTED_CERT_HOST,
+    NM_VPN_SERVICE_TYPE,
+)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(levelname)s: nm-openfortivpn-auth: %(message)s',
+    stream=sys.stderr,
+)
+log = logging.getLogger('nm-openfortivpn-auth')
+
+
+def read_nm_stdin():
+    """Read NM auth-dialog protocol from stdin.
+
+    Format:
+        DATA_KEY=value
+        ...
+        DATA_END
+        SECRET_KEY=value
+        ...
+        SECRET_END
+        HINT_KEY=value
+        ...
+        HINT_END
+        DONE
+    """
+    data = {}
+    secrets = {}
+    hints = []
+
+    section = None
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+
+        if line == 'DATA_KEY_VALUE':
+            section = 'data'
+            continue
+        elif line == 'DATA_END':
+            section = None
+            continue
+        elif line == 'SECRET_KEY_VALUE':
+            section = 'secret'
+            continue
+        elif line == 'SECRET_END':
+            section = None
+            continue
+        elif line == 'DONE':
+            break
+
+        if section == 'data':
+            if '=' in line:
+                key, _, value = line.partition('=')
+                data[key.strip()] = value.strip()
+            else:
+                # Key on one line, value on next
+                key = line
+                value = next(sys.stdin, '').strip()
+                data[key] = value
+        elif section == 'secret':
+            if '=' in line:
+                key, _, value = line.partition('=')
+                secrets[key.strip()] = value.strip()
+            else:
+                key = line
+                value = next(sys.stdin, '').strip()
+                secrets[key] = value
+
+    return data, secrets
+
+
+def parse_cmdline():
+    """Parse command-line arguments from NM."""
+    import argparse
+    parser = argparse.ArgumentParser(description='NM OpenFortiVPN Auth Dialog')
+    parser.add_argument('-u', '--uuid', help='Connection UUID')
+    parser.add_argument('-n', '--name', help='Connection name')
+    parser.add_argument('-s', '--service', help='VPN service type')
+    parser.add_argument('-i', '--allow-interaction', action='store_true',
+                        help='Allow user interaction')
+    parser.add_argument('--hint', action='append', default=[],
+                        help='Hints from the VPN plugin')
+    parser.add_argument('-r', '--reprompt', action='store_true',
+                        help='Reprompt for secrets')
+    parser.add_argument('-t', '--external-ui-mode', action='store_true',
+                        help='External UI mode')
+
+    args, _unknown = parser.parse_known_args()
+    return args
+
+
+def write_secrets(secrets):
+    """Write secrets back to NM in the expected format."""
+    for key, value in secrets.items():
+        sys.stdout.write(f'{key}\n{value}\n')
+    sys.stdout.write('\n\n')
+    sys.stdout.flush()
+
+
+class AuthDialog:
+    """GTK4 authentication dialog."""
+
+    def __init__(self, data, existing_secrets, hints, args):
+        self.data = data
+        self.existing_secrets = existing_secrets
+        self.hints = hints
+        self.args = args
+        self.result_secrets = {}
+        self.accepted = False
+
+    def run(self):
+        """Determine what to prompt for and show dialogs."""
+        # Check for untrusted cert hint
+        if HINT_UNTRUSTED_CERT_HASH in self.hints:
+            cert_hash = self.data.get(HINT_UNTRUSTED_CERT_HASH, '')
+            if cert_hash:
+                return self._show_cert_trust_dialog(cert_hash)
+
+        # Check if password is needed
+        need_password = not self.existing_secrets.get(KEY_PASSWORD)
+        need_otp = KEY_OTP in self.hints
+
+        if need_password or need_otp or self.args.reprompt:
+            return self._show_auth_dialog(need_password or self.args.reprompt, need_otp)
+
+        # If we have all secrets, just return them
+        if KEY_PASSWORD in self.existing_secrets:
+            self.result_secrets[KEY_PASSWORD] = self.existing_secrets[KEY_PASSWORD]
+        return True
+
+    def _show_auth_dialog(self, need_password, need_otp):
+        """Show password/OTP entry dialog."""
+        app = Gtk.Application(application_id='org.freedesktop.NetworkManager.openfortivpn.auth')
+        app.connect('activate', self._on_auth_activate, need_password, need_otp)
+        app.run([])
+        return self.accepted
+
+    def _on_auth_activate(self, app, need_password, need_otp):
+        win = Gtk.ApplicationWindow(application=app)
+        win.set_title('VPN Authentication — OpenFortiVPN')
+        win.set_default_size(400, -1)
+        win.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        win.set_child(box)
+
+        # Header
+        gateway = self.data.get(KEY_GATEWAY, 'VPN')
+        header = Gtk.Label(label=f'Authentication required for {gateway}')
+        header.add_css_class('title-3')
+        box.append(header)
+
+        # Username (read-only display)
+        username = self.data.get(KEY_USER, '')
+        if username:
+            user_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            user_label = Gtk.Label(label='User:')
+            user_label.set_xalign(0)
+            user_label.set_size_request(100, -1)
+            user_value = Gtk.Label(label=username)
+            user_value.set_xalign(0)
+            user_box.append(user_label)
+            user_box.append(user_value)
+            box.append(user_box)
+
+        # Password entry
+        self._password_entry = None
+        if need_password:
+            pw_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            pw_label = Gtk.Label(label='Password:')
+            pw_label.set_xalign(0)
+            pw_label.set_size_request(100, -1)
+            self._password_entry = Gtk.PasswordEntry()
+            self._password_entry.set_show_peek_icon(True)
+            self._password_entry.set_hexpand(True)
+            self._password_entry.connect('activate', lambda _: self._on_ok(win))
+            pw_box.append(pw_label)
+            pw_box.append(self._password_entry)
+            box.append(pw_box)
+
+        # OTP entry
+        self._otp_entry = None
+        if need_otp:
+            otp_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            otp_label = Gtk.Label(label='OTP:')
+            otp_label.set_xalign(0)
+            otp_label.set_size_request(100, -1)
+            self._otp_entry = Gtk.Entry()
+            self._otp_entry.set_hexpand(True)
+            self._otp_entry.set_input_purpose(Gtk.InputPurpose.PIN)
+            self._otp_entry.connect('activate', lambda _: self._on_ok(win))
+            otp_box.append(otp_label)
+            otp_box.append(self._otp_entry)
+            box.append(otp_box)
+
+        # Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        cancel_btn = Gtk.Button(label='Cancel')
+        cancel_btn.connect('clicked', lambda _: self._on_cancel(win))
+        btn_box.append(cancel_btn)
+
+        ok_btn = Gtk.Button(label='Connect')
+        ok_btn.add_css_class('suggested-action')
+        ok_btn.connect('clicked', lambda _: self._on_ok(win))
+        btn_box.append(ok_btn)
+
+        box.append(btn_box)
+
+        # Focus password entry
+        if self._password_entry:
+            self._password_entry.grab_focus()
+        elif self._otp_entry:
+            self._otp_entry.grab_focus()
+
+        win.present()
+
+    def _on_ok(self, win):
+        if self._password_entry:
+            password = self._password_entry.get_text()
+            if password:
+                self.result_secrets[KEY_PASSWORD] = password
+        elif KEY_PASSWORD in self.existing_secrets:
+            self.result_secrets[KEY_PASSWORD] = self.existing_secrets[KEY_PASSWORD]
+
+        if self._otp_entry:
+            otp = self._otp_entry.get_text()
+            if otp:
+                self.result_secrets[KEY_OTP] = otp
+
+        self.accepted = True
+        win.get_application().quit()
+
+    def _on_cancel(self, win):
+        self.accepted = False
+        win.get_application().quit()
+
+    def _show_cert_trust_dialog(self, cert_hash):
+        """Show certificate trust dialog."""
+        app = Gtk.Application(application_id='org.freedesktop.NetworkManager.openfortivpn.cert')
+        app.connect('activate', self._on_cert_activate, cert_hash)
+        app.run([])
+        return self.accepted
+
+    def _on_cert_activate(self, app, cert_hash):
+        win = Gtk.ApplicationWindow(application=app)
+        win.set_title('Untrusted VPN Certificate')
+        win.set_default_size(500, -1)
+        win.set_resizable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        win.set_child(box)
+
+        # Warning icon and message
+        warning_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        icon = Gtk.Image.new_from_icon_name('dialog-warning')
+        icon.set_pixel_size(48)
+        warning_box.append(icon)
+
+        msg = Gtk.Label()
+        gateway = self.data.get(KEY_GATEWAY, 'the VPN server')
+        msg.set_markup(
+            f'<b>The VPN gateway certificate is not trusted.</b>\n\n'
+            f'The certificate presented by <b>{GLib.markup_escape_text(gateway)}</b> '
+            f'could not be verified. This could mean:\n\n'
+            f'• The server uses a self-signed certificate\n'
+            f'• The server\'s CA is not in your trust store\n'
+            f'• Someone is intercepting your connection\n\n'
+            f'Do you want to trust this certificate for future connections?'
+        )
+        msg.set_wrap(True)
+        msg.set_max_width_chars(50)
+        msg.set_xalign(0)
+        warning_box.append(msg)
+        box.append(warning_box)
+
+        # Certificate hash display
+        hash_frame = Gtk.Frame()
+        hash_label = Gtk.Label()
+        # Format hash with colons for readability
+        formatted = cert_hash if ':' in cert_hash else ':'.join(
+            cert_hash[i:i+2] for i in range(0, len(cert_hash), 2)
+        )
+        hash_label.set_markup(
+            f'<b>SHA256 Fingerprint:</b>\n'
+            f'<tt>{GLib.markup_escape_text(formatted)}</tt>'
+        )
+        hash_label.set_wrap(True)
+        hash_label.set_selectable(True)
+        hash_label.set_margin_top(8)
+        hash_label.set_margin_bottom(8)
+        hash_label.set_margin_start(12)
+        hash_label.set_margin_end(12)
+        hash_frame.set_child(hash_label)
+        box.append(hash_frame)
+
+        # Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        reject_btn = Gtk.Button(label='Reject')
+        reject_btn.add_css_class('destructive-action')
+        reject_btn.connect('clicked', lambda _: self._on_cert_reject(win))
+        btn_box.append(reject_btn)
+
+        accept_btn = Gtk.Button(label='Trust This Certificate')
+        accept_btn.add_css_class('suggested-action')
+        accept_btn.connect('clicked', lambda _: self._on_cert_accept(win, cert_hash))
+        btn_box.append(accept_btn)
+
+        box.append(btn_box)
+        win.present()
+
+    def _on_cert_accept(self, win, cert_hash):
+        """User accepted the cert — output it as trusted-cert secret."""
+        self.result_secrets[HINT_UNTRUSTED_CERT_HASH] = cert_hash
+        # Also pass through any existing password
+        if KEY_PASSWORD in self.existing_secrets:
+            self.result_secrets[KEY_PASSWORD] = self.existing_secrets[KEY_PASSWORD]
+        self.accepted = True
+        win.get_application().quit()
+
+    def _on_cert_reject(self, win):
+        self.accepted = False
+        win.get_application().quit()
+
+
+def main():
+    args = parse_cmdline()
+
+    log.debug("Auth dialog started: uuid=%s name=%s hints=%s",
+              args.uuid, args.name, args.hint)
+
+    # Read data and secrets from NM
+    data, secrets = read_nm_stdin()
+    log.debug("Data keys: %s", list(data.keys()))
+    log.debug("Secret keys: %s", list(secrets.keys()))
+
+    dialog = AuthDialog(data, secrets, args.hint or [], args)
+
+    if dialog.run():
+        write_secrets(dialog.result_secrets)
+        log.debug("Secrets written: %s", list(dialog.result_secrets.keys()))
+    else:
+        log.info("Auth dialog cancelled")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

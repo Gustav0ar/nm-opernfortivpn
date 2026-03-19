@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.freedesktop.NetworkManager.openfortivpn
+Exec=@LIBEXECDIR@/nm-openfortivpn-service
+User=root
+SystemdService=dbus-org.freedesktop.NetworkManager.openfortivpn.service

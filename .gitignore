@@ -1,0 +1,45 @@
+# Build directories
+build*/
+build-tmp/
+build-asan/
+build-test/
+
+# Compiled objects/libraries
+*.o
+*.so
+*.a
+*.la
+*.lo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Meson/Ninja
+.mesonpy/
+meson-logs/
+meson-private/
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.sconsign.dblite
+.netrwbook
+tags
+
+# OS specific
+.DS_Store
+Thumb.db
+
+# Misc
+*.bak
+*~
+vgcore.*
+gmon.out
+asound.conf.lock

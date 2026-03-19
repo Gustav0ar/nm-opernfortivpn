@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-package-release:
+    name: Build, test, package and publish
+    runs-on: ubuntu-24.04
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(grep -E "^[[:space:]]*version:" meson.build | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "TAG_NAME=${GITHUB_REF_NAME:-v${version}}" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential meson ninja-build pkg-config \
+            libnm-dev libgtk-3-dev libglib2.0-dev ppp-dev \
+            python3 python3-gi python3-pytest gir1.2-gtk-4.0 \
+            openfortivpn ppp \
+            debhelper-compat dh-python devscripts dpkg-dev \
+            rpm
+
+      - name: Configure build
+        run: meson setup build-release
+
+      - name: Compile
+        run: meson compile -C build-release
+
+      - name: Run Meson tests
+        run: meson test -C build-release --print-errorlogs
+
+      - name: Run Python tests
+        run: python3 -m pytest tests/ -v
+
+      - name: Build source tarball
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz \
+            --prefix="nm-openfortivpn-${VERSION}/" \
+            -o "dist/nm-openfortivpn-${VERSION}.tar.gz" \
+            HEAD
+
+      - name: Build Debian package
+        run: |
+          cp -a packaging/debian debian
+          dpkg-buildpackage -us -uc -b
+          rm -rf debian
+          cp ../*.deb dist/ 2>/dev/null || true
+          cp ../*.ddeb dist/ 2>/dev/null || true
+          cp ../*.buildinfo dist/ 2>/dev/null || true
+          cp ../*.changes dist/ 2>/dev/null || true
+
+      - name: Build RPM package
+        run: |
+          docker run --rm \
+            -e VERSION="${VERSION}" \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            fedora:44 \
+            bash -lc '
+              set -euo pipefail
+              dnf install -y \
+                rpm-build meson ninja-build gcc \
+                pkgconf-pkg-config \
+                NetworkManager-libnm-devel gtk3-devel glib2-devel ppp-devel \
+                python3 python3-gobject gtk4
+
+              mkdir -p /tmp/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+              cp "dist/nm-openfortivpn-${VERSION}.tar.gz" /tmp/rpmbuild/SOURCES/
+              cp packaging/nm-openfortivpn.spec /tmp/rpmbuild/SPECS/
+
+              rpmbuild -ba \
+                --define "_topdir /tmp/rpmbuild" \
+                /tmp/rpmbuild/SPECS/nm-openfortivpn.spec
+
+              find /tmp/rpmbuild/RPMS -type f -name "*.rpm" -exec cp {} /workspace/dist/ \;
+              find /tmp/rpmbuild/SRPMS -type f -name "*.rpm" -exec cp {} /workspace/dist/ \;
+            '
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ github.run_id }}
+          path: dist/
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/* --clobber
+          else
+            gh release create "$TAG_NAME" dist/* --title "$TAG_NAME" --generate-notes
+          fi

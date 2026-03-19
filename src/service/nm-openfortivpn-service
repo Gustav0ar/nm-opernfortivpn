@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+# nm-openfortivpn-service — NetworkManager VPN service daemon for openfortivpn
+#
+# This is the main entry point. The service module does the heavy lifting.
+
+import sys
+import os
+import signal
+import logging
+
+import gi
+gi.require_version('NM', '1.0')
+gi.require_version('GLib', '2.0')
+from gi.repository import GLib, NM
+
+# Add shared module path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shared'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from nm_openfortivpn_service import OpenfortivpnPlugin
+
+logging.basicConfig(
+    level=logging.DEBUG if '--debug' in sys.argv else logging.INFO,
+    format='%(levelname)s: nm-openfortivpn-service: %(message)s',
+    stream=sys.stderr,
+)
+log = logging.getLogger('nm-openfortivpn')
+
+
+def main():
+    mainloop = GLib.MainLoop()
+
+    def quit_handler(*_args):
+        mainloop.quit()
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_handler)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit_handler)
+
+    try:
+        plugin = OpenfortivpnPlugin()
+    except Exception as e:
+        log.error("Failed to create plugin: %s", e)
+        sys.exit(1)
+
+    # Plugin auto-shuts down after timeout if unused
+    plugin.connect('quit', lambda _: mainloop.quit())
+
+    log.info("nm-openfortivpn-service started (pid=%d)", os.getpid())
+    mainloop.run()
+    log.info("nm-openfortivpn-service exiting")
+
+
+if __name__ == '__main__':
+    main()

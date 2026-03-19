@@ -1,0 +1,7 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: nm-openfortivpn
+Source: https://github.com/Gustav0ar/nm-opernfortivpn
+
+Files: *
+Copyright: 2026
+License: GPL-2.0-only

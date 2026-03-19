@@ -1,0 +1,42 @@
+Source: nm-openfortivpn
+Section: net
+Priority: optional
+Maintainer: nm-openfortivpn Maintainers <maintainers@localhost>
+Build-Depends:
+ debhelper-compat (= 13),
+ meson,
+ ninja-build,
+ libnm-dev (>= 1.2),
+ libgtk-3-dev,
+ libglib2.0-dev,
+ ppp-dev,
+ python3,
+ pkg-config,
+Standards-Version: 4.6.0
+Homepage: https://github.com/Gustav0ar/nm-opernfortivpn
+
+Package: network-manager-openfortivpn
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ network-manager (>= 1.2),
+ openfortivpn,
+ ppp,
+ python3,
+ python3-gi,
+ gir1.2-gtk-4.0,
+ gir1.2-nm-1.0,
+Recommends:
+ nm-connection-editor,
+ gnome-keyring | kwalletmanager,
+Description: NetworkManager VPN plugin for openfortivpn
+ This package provides NetworkManager integration for openfortivpn,
+ an open-source client for Fortinet SSL VPN (FortiGate).
+ .
+ Features:
+  - Connect/disconnect via nmcli, nmtui, or GUI
+  - Secure password storage via GNOME Keyring or KWallet
+  - Untrusted certificate detection and trust workflow
+  - Full settings editor in nm-connection-editor
+  - DNS and routing configuration
